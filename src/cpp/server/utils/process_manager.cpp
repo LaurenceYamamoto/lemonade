@@ -146,6 +146,19 @@ static std::string escape_windows_arg(const std::string& arg) {
     return result;
 }
 
+#ifdef _WIN32
+// UTF-8 <-> UTF-16 helpers for Windows Unicode API calls.
+// All std::string values in this codebase are UTF-8 encoded.
+static std::wstring utf8_to_wide(const std::string& s) {
+    if (s.empty()) return {};
+    int n = MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, nullptr, 0);
+    if (n <= 0) return {};
+    std::wstring r(n - 1, L'\0');
+    MultiByteToWideChar(CP_UTF8, 0, s.c_str(), -1, &r[0], n);
+    return r;
+}
+#endif
+
 // Thread function to read from pipe and filter output
 static DWORD WINAPI output_filter_thread(LPVOID param) {
     HANDLE pipe = static_cast<HANDLE>(param);
@@ -182,54 +195,56 @@ static std::string lowercase_ascii(std::string s) {
     return s;
 }
 
-static std::vector<char> build_windows_environment_block(
+static std::vector<wchar_t> build_windows_environment_block(
     const std::vector<std::pair<std::string, std::string>>& env_vars) {
-    std::vector<std::string> merged_entries;
+    std::vector<std::wstring> merged_entries;
 
     LPWCH environment = GetEnvironmentStringsW();
     if (environment) {
         for (const wchar_t* entry = environment; *entry != L'\0';
              entry += std::wcslen(entry) + 1) {
-            int size_needed = WideCharToMultiByte(CP_UTF8, 0, entry, -1, nullptr, 0, nullptr, nullptr);
-            if (size_needed > 0) {
-                std::string narrow(size_needed - 1, '\0');
-                WideCharToMultiByte(CP_UTF8, 0, entry, -1, &narrow[0], size_needed, nullptr, nullptr);
-                merged_entries.emplace_back(std::move(narrow));
-            }
+            merged_entries.emplace_back(entry);
         }
         FreeEnvironmentStringsW(environment);
     }
 
     for (const auto& env : env_vars) {
         const std::string key_lower = lowercase_ascii(env.first);
-        const std::string new_entry = env.first + "=" + env.second;
+        const std::wstring new_entry_wide = utf8_to_wide(env.first + "=" + env.second);
 
         bool replaced = false;
         for (auto& existing : merged_entries) {
-            size_t equals = existing.find('=');
-            if (equals == std::string::npos) {
+            size_t equals = existing.find(L'=');
+            if (equals == std::wstring::npos) {
                 continue;
             }
 
-            std::string existing_key = lowercase_ascii(existing.substr(0, equals));
-            if (existing_key == key_lower) {
-                existing = new_entry;
+            // Convert key to UTF-8 for ASCII-safe comparison
+            std::wstring wkey = existing.substr(0, equals);
+            int nb = WideCharToMultiByte(CP_UTF8, 0, wkey.c_str(), -1, nullptr, 0, nullptr, nullptr);
+            std::string existing_key(nb > 0 ? nb - 1 : 0, '\0');
+            if (nb > 0) {
+                WideCharToMultiByte(CP_UTF8, 0, wkey.c_str(), -1, &existing_key[0], nb, nullptr, nullptr);
+            }
+
+            if (lowercase_ascii(existing_key) == key_lower) {
+                existing = new_entry_wide;
                 replaced = true;
                 break;
             }
         }
 
         if (!replaced) {
-            merged_entries.push_back(new_entry);
+            merged_entries.push_back(new_entry_wide);
         }
     }
 
-    std::vector<char> block;
+    std::vector<wchar_t> block;
     for (const auto& entry : merged_entries) {
         block.insert(block.end(), entry.begin(), entry.end());
-        block.push_back('\0');
+        block.push_back(L'\0');
     }
-    block.push_back('\0');
+    block.push_back(L'\0');
     return block;
 }
 #endif
@@ -247,13 +262,16 @@ ProcessHandle ProcessManager::start_process(
     handle.pid = 0;
 
 #ifdef _WIN32
-    // Windows implementation
-    std::string cmdline = escape_windows_arg(executable);
+    // Windows implementation — use wide (Unicode) APIs so that paths
+    // containing non-ASCII characters (e.g. Kanji user profile dirs) work
+    // correctly on systems where CP_ACP ≠ UTF-8 (e.g. CP932 on Japanese Windows).
+    std::wstring wcmdline = utf8_to_wide(escape_windows_arg(executable));
     for (const auto& arg : args) {
-        cmdline += " " + escape_windows_arg(arg);
+        wcmdline += L" " + utf8_to_wide(escape_windows_arg(arg));
     }
+    std::wstring wworking_dir = working_dir.empty() ? std::wstring() : utf8_to_wide(working_dir);
 
-    STARTUPINFOA si;
+    STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
@@ -309,7 +327,7 @@ ProcessHandle ProcessManager::start_process(
         si.dwFlags = STARTF_USESTDHANDLES;
         si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
         if (si.hStdInput == nullptr || si.hStdInput == INVALID_HANDLE_VALUE) {
-            nul_input = CreateFileA("NUL", GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+            nul_input = CreateFileW(L"NUL", GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
             if (nul_input != INVALID_HANDLE_VALUE) {
                 SetHandleInformation(nul_input, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
                 si.hStdInput = nul_input;
@@ -320,20 +338,20 @@ ProcessHandle ProcessManager::start_process(
         si.hStdOutput = stdout_write;
         si.hStdError = stderr_write;
 
-        LOG(DEBUG, "ProcessManager") << "Starting process with filtered output: " << cmdline << std::endl;
+        LOG(DEBUG, "ProcessManager") << "Starting process with filtered output: " << executable << std::endl;
     } else if (inherit_output) {
         // Direct inheritance without filtering
         si.dwFlags |= STARTF_USESTDHANDLES;
         si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
         si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
         si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-        LOG(DEBUG, "ProcessManager") << "Starting process with inherited output: " << cmdline << std::endl;
+        LOG(DEBUG, "ProcessManager") << "Starting process with inherited output: " << executable << std::endl;
     } else {
         // Redirect to NUL to suppress output when not in debug mode
         si.dwFlags |= STARTF_USESTDHANDLES;
         si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
-        HANDLE hNul = CreateFileA("NUL", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        HANDLE hNul = CreateFileW(L"NUL", GENERIC_WRITE, FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
         if (hNul != INVALID_HANDLE_VALUE) {
             // Ensure the NUL handle is inheritable
             SetHandleInformation(hNul, HANDLE_FLAG_INHERIT, HANDLE_FLAG_INHERIT);
@@ -342,20 +360,25 @@ ProcessHandle ProcessManager::start_process(
         }
     }
 
-    std::vector<char> environment_block;
+    std::vector<wchar_t> environment_block;
     if (!env_vars.empty()) {
         environment_block = build_windows_environment_block(env_vars);
     }
 
-    BOOL success = CreateProcessA(
+    DWORD create_flags = CREATE_UNICODE_ENVIRONMENT;
+    if (!inherit_output || use_filtered_output) {
+        create_flags |= CREATE_NO_WINDOW;
+    }
+
+    BOOL success = CreateProcessW(
         nullptr,
-        const_cast<char*>(cmdline.c_str()),
+        const_cast<wchar_t*>(wcmdline.c_str()),
         nullptr,
         nullptr,
         TRUE,  // Inherit handles
-        (inherit_output && !use_filtered_output) ? 0 : CREATE_NO_WINDOW,
-        environment_block.empty() ? nullptr : environment_block.data(),
-        working_dir.empty() ? nullptr : working_dir.c_str(),
+        create_flags,
+        environment_block.empty() ? nullptr : static_cast<LPVOID>(environment_block.data()),
+        wworking_dir.empty() ? nullptr : wworking_dir.c_str(),
         &si,
         &pi
     );
@@ -823,10 +846,11 @@ int ProcessManager::run_process_with_output(
 
 #ifdef _WIN32
     // Windows implementation
-    std::string cmdline = escape_windows_arg(executable);
+    std::wstring wcmdline = utf8_to_wide(escape_windows_arg(executable));
     for (const auto& arg : args) {
-        cmdline += " " + escape_windows_arg(arg);
+        wcmdline += L" " + utf8_to_wide(escape_windows_arg(arg));
     }
+    std::wstring wworking_dir_str = working_dir.empty() ? std::wstring() : utf8_to_wide(working_dir);
 
     // Create pipes for stdout
     HANDLE stdout_read = nullptr;
@@ -844,7 +868,7 @@ int ProcessManager::run_process_with_output(
     // Make sure the read handle is not inherited
     SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOA si;
+    STARTUPINFOW si;
     PROCESS_INFORMATION pi;
     ZeroMemory(&si, sizeof(si));
     si.cb = sizeof(si);
@@ -854,15 +878,15 @@ int ProcessManager::run_process_with_output(
     si.hStdError = stdout_write;  // Merge stderr into stdout
     ZeroMemory(&pi, sizeof(pi));
 
-    BOOL success = CreateProcessA(
+    BOOL success = CreateProcessW(
         nullptr,
-        const_cast<char*>(cmdline.c_str()),
+        const_cast<wchar_t*>(wcmdline.c_str()),
         nullptr,
         nullptr,
         TRUE,  // Inherit handles
-        CREATE_NO_WINDOW,
+        CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
         nullptr,
-        working_dir.empty() ? nullptr : working_dir.c_str(),
+        wworking_dir_str.empty() ? nullptr : wworking_dir_str.c_str(),
         &si,
         &pi
     );
@@ -1241,7 +1265,7 @@ int ProcessManager::run_command(const std::string& command, std::string& output,
     }
     SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0);
 
-    STARTUPINFOA si = {};
+    STARTUPINFOW si = {};
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdInput = INVALID_HANDLE_VALUE;
@@ -1250,10 +1274,10 @@ int ProcessManager::run_command(const std::string& command, std::string& output,
 
     PROCESS_INFORMATION pi = {};
     // Wrap in cmd /c so shell features (redirection, pipes) work
-    std::string cmdline = "cmd /c " + command;
-    BOOL success = CreateProcessA(
-        nullptr, const_cast<char*>(cmdline.c_str()),
-        nullptr, nullptr, TRUE, CREATE_NO_WINDOW,
+    std::wstring wcmdline_run = utf8_to_wide("cmd /c " + command);
+    BOOL success = CreateProcessW(
+        nullptr, const_cast<wchar_t*>(wcmdline_run.c_str()),
+        nullptr, nullptr, TRUE, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
         nullptr, nullptr, &si, &pi);
 
     CloseHandle(stdout_write);

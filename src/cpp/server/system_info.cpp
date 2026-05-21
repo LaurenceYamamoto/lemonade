@@ -2078,30 +2078,30 @@ double WindowsSystemInfo::get_nvidia_vram_smi() {
 }
 
 void WindowsSystemInfo::load_dxdiag_cache() {
-    char temp_path[MAX_PATH];
-    char temp_dir[MAX_PATH];
-    GetTempPathA(MAX_PATH, temp_dir);
-    if (GetTempFileNameA(temp_dir, "dxd", 0, temp_path) == 0) {
+    wchar_t temp_dir[MAX_PATH];
+    wchar_t temp_path[MAX_PATH];
+    GetTempPathW(MAX_PATH, temp_dir);
+    if (GetTempFileNameW(temp_dir, L"dxd", 0, temp_path) == 0) {
         return;
     }
 
-    std::string command = "dxdiag /t \"" + std::string(temp_path) + "\"";
-    STARTUPINFOA si = {};
+    std::wstring command = L"dxdiag /t \"" + std::wstring(temp_path) + L"\"";
+    STARTUPINFOW si = {};
     si.cb = sizeof(si);
     PROCESS_INFORMATION pi = {};
-    if (!CreateProcessA(nullptr, const_cast<char*>(command.c_str()),
+    if (!CreateProcessW(nullptr, const_cast<wchar_t*>(command.c_str()),
                         nullptr, nullptr, FALSE, CREATE_NO_WINDOW,
                         nullptr, nullptr, &si, &pi)) {
-        DeleteFileA(temp_path);
+        DeleteFileW(temp_path);
         return;
     }
     WaitForSingleObject(pi.hProcess, 10000);
     CloseHandle(pi.hProcess);
     CloseHandle(pi.hThread);
 
-    std::ifstream file(temp_path);
+    std::ifstream file{std::filesystem::path(temp_path)};
     if (!file.is_open()) {
-        DeleteFileA(temp_path);
+        DeleteFileW(temp_path);
         return;
     }
 
@@ -2140,7 +2140,7 @@ void WindowsSystemInfo::load_dxdiag_cache() {
     }
 
     file.close();
-    DeleteFileA(temp_path);
+    DeleteFileW(temp_path);
 }
 
 double WindowsSystemInfo::get_gpu_vram_dxdiag(const std::string& gpu_name) {

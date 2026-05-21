@@ -51,6 +51,14 @@ static bool safe_is_directory(const fs::path& p) { return fs::is_directory(p); }
 static constexpr auto safe_dir_options = fs::directory_options::none;
 #endif
 
+// String overloads that use path_from_utf8 for correct UTF-8 handling on all platforms.
+// On Windows with CP_ACP != UTF-8 (e.g. CP932), constructing fs::path from
+// a char* or std::string uses MultiByteToWideChar(CP_ACP) which misinterprets
+// UTF-8 bytes. path_from_utf8 uses CP_UTF8 on Windows, so these overloads
+// are safe for paths that contain Kanji or other non-ASCII characters.
+static bool safe_exists(const std::string& p) { return safe_exists(path_from_utf8(p)); }
+static bool safe_is_directory(const std::string& p) { return safe_is_directory(path_from_utf8(p)); }
+
 namespace lemon {
 
 // Properties which are defined by the user for model registration.
@@ -1314,25 +1322,25 @@ json ModelManager::load_server_models() {
 }
 
 json ModelManager::load_optional_json(const std::string& path) {
-    if (!fs::exists(path)) {
+    if (!fs::exists(lemon::utils::path_from_utf8(path))) {
         return json::object();
     }
 
     try {
-        LOG(INFO, "ModelManager") << "Loading " << fs::path(path).filename() << std::endl;
+        LOG(INFO, "ModelManager") << "Loading " << lemon::utils::path_from_utf8(path).filename() << std::endl;
         return JsonUtils::load_from_file(path);
     } catch (const std::exception& e) {
-        LOG(WARNING, "ModelManager") << "Could not load " << fs::path(path).filename() << ": " << e.what() << std::endl;
+        LOG(WARNING, "ModelManager") << "Could not load " << lemon::utils::path_from_utf8(path).filename() << ": " << e.what() << std::endl;
         return json::object();
     }
 }
 
 static void save_user_json(const std::string& save_path, const json& to_save) {
     // Ensure directory exists
-    fs::path dir = fs::path(save_path).parent_path();
+    fs::path dir = lemon::utils::path_from_utf8(save_path).parent_path();
     fs::create_directories(dir);
 
-    LOG(INFO, "ModelManager") << "Saving " << fs::path(save_path).filename() << std::endl;
+    LOG(INFO, "ModelManager") << "Saving " << lemon::utils::path_from_utf8(save_path).filename() << std::endl;
     JsonUtils::save_to_file(to_save, save_path);
 }
 
@@ -1559,7 +1567,7 @@ void ModelManager::build_cache() {
                 // Also check for incomplete downloads:
                 // 1. Check for .download_manifest.json in snapshot directory
                 // 2. Check for any .partial files
-                fs::path resolved(info.resolved_path());
+                fs::path resolved = path_from_utf8(info.resolved_path());
 
                 // For directories (OGA models), check within the directory
                 // For files (GGUF models), check in parent directory
@@ -1695,7 +1703,7 @@ void ModelManager::add_model_to_cache(const std::string& model_name) {
 
         if (file_exists) {
             // Check for incomplete downloads
-            fs::path resolved(info.resolved_path());
+            fs::path resolved = path_from_utf8(info.resolved_path());
             fs::path snapshot_dir = safe_is_directory(resolved) ? resolved : resolved.parent_path();
 
             fs::path manifest_path = snapshot_dir / ".download_manifest.json";

@@ -105,10 +105,9 @@ std::string path_to_utf8(const fs::path& path) {
 
 std::string get_executable_dir() {
 #ifdef _WIN32
-    char buffer[MAX_PATH];
-    GetModuleFileNameA(NULL, buffer, MAX_PATH);
-    fs::path exe_path(buffer);
-    return exe_path.parent_path().string();
+    wchar_t buffer[MAX_PATH];
+    GetModuleFileNameW(NULL, buffer, MAX_PATH);
+    return wstring_to_utf8(fs::path(buffer).parent_path().wstring());
 #elif defined(__linux__)
     char buffer[PATH_MAX];
     ssize_t len = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
@@ -200,11 +199,12 @@ std::string find_flm_executable() {
 #ifdef _WIN32
     // On Windows, only check the Lemonade install directory (auto-installed zip).
     // No system PATH fallback - FLM should be installed via install_backend().
-    std::string install_dir = (fs::path(get_downloaded_bin_dir()) / "flm" / "npu").make_preferred().string();
-    if (fs::exists(install_dir)) {
-        for (const auto& entry : fs::recursive_directory_iterator(install_dir)) {
+    fs::path install_path = (path_from_utf8(get_downloaded_bin_dir()) / "flm" / "npu").make_preferred();
+    std::string install_dir = path_to_utf8(install_path);
+    if (fs::exists(install_path)) {
+        for (const auto& entry : fs::recursive_directory_iterator(install_path)) {
             if (entry.is_regular_file() && entry.path().filename().string() == "flm.exe") {
-                std::string path = entry.path().string();
+                std::string path = path_to_utf8(entry.path());
                 if (is_safe_executable_path(path)) {
                     return path;
                 }
@@ -226,18 +226,19 @@ std::string find_executable_in_path(const std::string& executable_name) {
         return "";
     }
 #ifdef _WIN32
-    char found_path[MAX_PATH];
-    DWORD result = SearchPathA(
-        nullptr,      // Use system PATH
-        executable_name.c_str(), // File to search for
-        nullptr,      // No default extension needed
+    std::wstring wexe = utf8_to_wstring(executable_name);
+    wchar_t found_path[MAX_PATH];
+    DWORD result = SearchPathW(
+        nullptr,          // Use system PATH
+        wexe.c_str(),     // File to search for
+        nullptr,          // No default extension needed
         MAX_PATH,
         found_path,
         nullptr
     );
 
     if (result > 0 && result < MAX_PATH) {
-        std::string path(found_path);
+        std::string path = wstring_to_utf8(std::wstring(found_path));
         return is_safe_executable_path(path) ? path : "";
     }
 
@@ -404,9 +405,9 @@ std::string get_hf_cache_dir() {
 
 std::string get_runtime_dir() {
 #ifdef _WIN32
-    char temp_path[MAX_PATH];
-    GetTempPathA(MAX_PATH, temp_path);
-    return std::string(temp_path);
+    wchar_t temp_path[MAX_PATH];
+    GetTempPathW(MAX_PATH, temp_path);
+    return wstring_to_utf8(std::wstring(temp_path));
 #else
     // Use $XDG_RUNTIME_DIR/lemonade only when the base directory is set,
     // actually exists on disk, and is writable by the current process.
@@ -436,11 +437,11 @@ std::string get_runtime_dir() {
 std::string get_downloaded_bin_dir() {
     // Use cache directory on all platforms for consistent multi-user support
     // This is important for All Users installs on Windows where Program Files is read-only
-    // Use fs::path to ensure native path separators (avoids cmd.exe issues on Windows)
-    std::string bin_dir = (fs::path(get_cache_dir()) / "bin").make_preferred().string();
+    // Use path_from_utf8 to correctly handle UTF-8 paths on all platforms
+    fs::path bin_path = (path_from_utf8(get_cache_dir()) / "bin").make_preferred();
+    std::string bin_dir = path_to_utf8(bin_path);
 
     // Ensure directory exists
-    fs::path bin_path = path_from_utf8(bin_dir);
     if (!fs::exists(bin_path)) {
         fs::create_directories(bin_path);
     }

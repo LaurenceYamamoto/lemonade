@@ -135,10 +135,11 @@ namespace lemon::backends {
     }
 
     std::string BackendUtils::get_install_directory(const std::string& dir_name, const std::string& backend) {
-        // Use fs::path throughout to ensure consistent native separators
-        fs::path ret = fs::path(utils::get_downloaded_bin_dir()) / dir_name;
+        // Use path_from_utf8 so that UTF-8 cache paths are handled correctly on
+        // Windows where CP_ACP may differ from UTF-8 (e.g. CP932 on Japanese Windows).
+        fs::path ret = utils::path_from_utf8(utils::get_downloaded_bin_dir()) / dir_name;
         if (!backend.empty()) ret /= backend;
-        return ret.make_preferred().string();
+        return utils::path_to_utf8(ret.make_preferred());
     }
 
     void BackendUtils::build_bin_config_key(const std::string& recipe,
@@ -183,11 +184,12 @@ namespace lemon::backends {
     }
 
     std::string BackendUtils::find_executable_in_install_dir(const std::string& install_dir, const std::string& binary_name) {
-        if (fs::exists(install_dir)) {
+        fs::path install_path = utils::path_from_utf8(install_dir);
+        if (fs::exists(install_path)) {
             // This could be optimized with a cache but saving a few milliseconds every few minutes/hours is not going to do much
-            for (const fs::directory_entry& dir_entry : fs::recursive_directory_iterator(install_dir)) {
+            for (const fs::directory_entry& dir_entry : fs::recursive_directory_iterator(install_path)) {
                 if (dir_entry.is_regular_file() && dir_entry.path().filename() == binary_name) {
-                    return dir_entry.path().string();
+                    return utils::path_to_utf8(dir_entry.path());
                 }
             }
         }
@@ -631,13 +633,13 @@ namespace lemon::backends {
     }
 
     std::string BackendUtils::get_therock_install_dir(const std::string& arch, const std::string& version) {
-        fs::path therock_base = fs::path(utils::get_downloaded_bin_dir()) / "therock";
-        return (therock_base / (arch + "-" + version)).string();
+        fs::path therock_base = utils::path_from_utf8(utils::get_downloaded_bin_dir()) / "therock";
+        return utils::path_to_utf8((therock_base / (arch + "-" + version)));
     }
 
     void BackendUtils::cleanup_old_therock_versions(const std::string& current_version) {
 #ifdef __linux__
-        fs::path therock_base = fs::path(utils::get_downloaded_bin_dir()) / "therock";
+        fs::path therock_base = utils::path_from_utf8(utils::get_downloaded_bin_dir()) / "therock";
 
         if (!fs::exists(therock_base)) {
             return;
